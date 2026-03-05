@@ -1,0 +1,81 @@
+flowchart TB
+    subgraph EXTERNAL["🌐  External"]
+        REPO[("Model Repository\n──────────────\n• Source of truth\n• Versioned model files")]
+    end
+
+    subgraph CLUSTER["🏢  Data Center Cluster"]
+        direction TB
+
+        subgraph CONTROL["Control Plane"]
+            TRACKER["🎯  Centralized Tracker\n──────────────────────\n• Global chunk bitmap\n• Bandwidth state / node\n• Peer-selection engine\n• Rarity-First / Topo-Aware\n• Job lifecycle management"]
+            MANIFEST["📋  Manifest Service\n──────────────────────\n• file_id, version\n• total_size, chunk_size\n• chunk_count\n• SHA-256 hashes[]"]
+        end
+
+        subgraph DATA["Data Plane"]
+            direction LR
+
+            subgraph RACK1["Rack A"]
+                SEED["🌱  Seed Node\n─────────────\n• First full download\n• Seeds all peers\n• Reports bitmap"]
+                N1["Node A-2\n─────────\n• Partial chunks\n• Upload ↔ Download\n• 10 Gbps each"]
+                N2["Node A-3\n─────────\n• Partial chunks\n• Upload ↔ Download\n• 10 Gbps each"]
+            end
+
+            subgraph RACK2["Rack B"]
+                N3["Node B-1\n─────────\n• Partial chunks\n• Upload ↔ Download\n• 10 Gbps each"]
+                N4["Node B-2\n─────────\n• Partial chunks\n• Upload ↔ Download\n• 10 Gbps each"]
+                N5["Node B-3\n─────────\n• Partial chunks\n• Upload ↔ Download\n• 10 Gbps each"]
+            end
+
+            subgraph RACK3["Rack C  (··· up to 1000s of nodes)"]
+                N6["Node C-1"]
+                N7["Node C-2"]
+                DOTS["  ···  "]
+            end
+        end
+
+        subgraph OBS["Observability"]
+            DASH["📊  Dashboard\n────────────────\n• Per-node heatmap\n• Chunk rarity histogram\n• ETC / throughput"]
+        end
+    end
+
+    %% ── External → Seed ──────────────────────────────────────────
+    REPO -->|"10 Gbps\nfull model download"| SEED
+
+    %% ── Seed / Nodes → Tracker (control) ─────────────────────────
+    SEED <-->|"① bitmap update\n② peer-list query"| TRACKER
+    N1   <-->|"bitmap + BW report\npeer-list response"| TRACKER
+    N2   <-->|"bitmap + BW report\npeer-list response"| TRACKER
+    N3   <-->|"bitmap + BW report\npeer-list response"| TRACKER
+    N4   <-->|"bitmap + BW report\npeer-list response"| TRACKER
+
+    %% ── Manifest fetch ────────────────────────────────────────────
+    SEED -->|"fetch manifest"| MANIFEST
+    N1   -->|"fetch manifest"| MANIFEST
+    N3   -->|"fetch manifest"| MANIFEST
+
+    %% ── Intra-cluster P2P data transfer ───────────────────────────
+    SEED -->|"chunk transfer\n(P2P data plane)"| N1
+    SEED -->|"chunk transfer"| N3
+    N1   -->|"cross-seed"| N2
+    N3   -->|"cross-seed"| N4
+    N4   -->|"cross-seed"| N5
+    N2   -->|"cross-rack\nchunk transfer"| N6
+    N5   -->|"cross-rack\nchunk transfer"| N7
+
+    %% ── Observability ─────────────────────────────────────────────
+    TRACKER -->|"job metrics\nprogress events"| DASH
+
+    %% ── Styles ────────────────────────────────────────────────────
+    classDef external   fill:#1A56A0,stroke:#0d3d7a,color:#fff,rx:8
+    classDef control    fill:#2E86C1,stroke:#1a5276,color:#fff,rx:6
+    classDef seed       fill:#1E8449,stroke:#145a32,color:#fff,rx:6
+    classDef peer       fill:#D6E8F7,stroke:#2E86C1,color:#1a1a1a,rx:6
+    classDef obs        fill:#F9F3E3,stroke:#D4AC0D,color:#1a1a1a,rx:6
+    classDef dots       fill:none,stroke:none,color:#7F8C8D
+
+    class REPO external
+    class TRACKER,MANIFEST control
+    class SEED seed
+    class N1,N2,N3,N4,N5,N6,N7 peer
+    class DASH obs
+    class DOTS dots

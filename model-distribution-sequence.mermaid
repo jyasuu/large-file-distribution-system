@@ -1,0 +1,146 @@
+sequenceDiagram
+    autonumber
+
+    actor Operator
+    participant MS  as Manifest Service
+    participant EXT as External Repo
+    participant TR  as Centralized Tracker
+    participant SN  as Seed Node
+    participant N1  as Peer Node A
+    participant N2  as Peer Node B
+    participant OBS as Observability
+
+    %% ════════════════════════════════════════════════
+    %% PHASE 1 — Job Initialisation
+    %% ════════════════════════════════════════════════
+    rect rgb(214, 232, 247)
+        Note over Operator,OBS: 📋 Phase 1 — Job Initialisation
+        Operator ->> MS: POST /manifests  { file_id, version, chunk_size }
+        MS ->> MS: hash each chunk → build Manifest
+        MS -->> Operator: 200 OK  { manifest_id, chunk_count }
+
+        Operator ->> TR: POST /jobs  { manifest_id, policy: "rarity-first" }
+        TR -->> Operator: 200 OK  { job_id }
+        TR ->> OBS: job_created event
+    end
+
+    %% ════════════════════════════════════════════════
+    %% PHASE 2 — Seed Node Downloads from External Repo
+    %% ════════════════════════════════════════════════
+    rect rgb(234, 250, 241)
+        Note over Operator,OBS: 🌱 Phase 2 — Seed Node Bootstraps (10 Gbps external link)
+        SN ->> MS: GET /manifests/{manifest_id}
+        MS -->> SN: Manifest  { chunk_count, chunk_hashes[] }
+
+        loop for each chunk i  (streamed, not waiting for full file)
+            SN ->> EXT: GET /model  Range: bytes={start}-{end}
+            EXT -->> SN: chunk[i] bytes
+            SN ->> SN: verify SHA-256(chunk[i])
+            SN ->> TR: PATCH /jobs/{job_id}/nodes/seed  { bitmap, upload_bw }
+            TR ->> OBS: node_progress event  { node: seed, pct }
+        end
+
+        SN -->> TR: bitmap = 1111…1  (all chunks complete)
+    end
+
+    %% ════════════════════════════════════════════════
+    %% PHASE 3 — Peer Nodes Join & Download (P2P)
+    %% ════════════════════════════════════════════════
+    rect rgb(253, 245, 230)
+        Note over Operator,OBS: 🔄 Phase 3 — P2P Distribution (data plane bypasses Tracker)
+
+        par Node A download loop
+            N1 ->> MS: GET /manifests/{manifest_id}
+            MS -->> N1: Manifest
+
+            loop until bitmap full
+                N1 ->> TR: GET /jobs/{job_id}/peers/{chunk_id}
+                Note right of TR: Rarity-First:<br/>rank by holder count ↑<br/>then bandwidth ↓
+                TR -->> N1: [ {peer: SeedNode, bw: 10Gbps}, … ]
+
+                N1 ->> SN: GET /chunks/{file_id}/{chunk_id}  (direct P2P)
+                SN -->> N1: chunk bytes
+                N1 ->> N1: verify SHA-256
+                N1 ->> TR: PATCH bitmap update
+                TR ->> OBS: node_progress event
+            end
+
+        and Node B download loop
+            N2 ->> MS: GET /manifests/{manifest_id}
+            MS -->> N2: Manifest
+
+            loop until bitmap full
+                N2 ->> TR: GET /jobs/{job_id}/peers/{chunk_id}
+                Note right of TR: Topology-Aware:<br/>same rack first,<br/>then by bandwidth
+                TR -->> N2: [ {peer: NodeA, bw: 10Gbps}, {peer: SeedNode, …} ]
+
+                N2 ->> N1: GET /chunks/{file_id}/{chunk_id}  (direct P2P, local rack)
+                N1 -->> N2: chunk bytes
+                N2 ->> N2: verify SHA-256
+                N2 ->> TR: PATCH bitmap update
+                TR ->> OBS: node_progress event
+            end
+        end
+    end
+
+    %% ════════════════════════════════════════════════
+    %% PHASE 4 — Tail: Hash Mismatch Retry
+    %% ════════════════════════════════════════════════
+    rect rgb(253, 236, 234)
+        Note over Operator,OBS: ⚠️  Phase 4 — Chunk Corruption Handling
+        N2 ->> N1: GET /chunks/{file_id}/chunk_99
+        N1 -->> N2: corrupt bytes
+        N2 ->> N2: SHA-256 mismatch ✗
+        N2 ->> TR: GET /jobs/{job_id}/peers/chunk_99  (retry, blacklist N1)
+        TR -->> N2: [ {peer: SeedNode} ]
+        N2 ->> SN: GET /chunks/{file_id}/chunk_99
+        SN -->> N2: chunk bytes
+        N2 ->> N2: SHA-256 match ✓
+        N2 ->> TR: PATCH bitmap  { chunk_99: complete }
+    end
+
+    %% ════════════════════════════════════════════════
+    %% PHASE 5 — Erasure Coding (Long-Tail)
+    %% ════════════════════════════════════════════════
+    rect rgb(240, 234, 255)
+        Note over Operator,OBS: 🔢 Phase 5 — EC Tail Phase (>95% nodes complete)
+        TR ->> TR: detect scarce chunks  (replica_count < 3)
+        TR ->> SN: trigger EC encode  { stripe_chunks[] }
+        SN ->> SN: Reed-Solomon encode → parity shards
+        SN ->> N1: push parity shard P1
+        SN ->> N2: push parity shard P2
+        N2 ->> N2: reconstruct missing chunk from k-of-(k+m) shards
+        N2 ->> TR: PATCH bitmap  { all chunks complete }
+        TR ->> OBS: node_complete event  { node: B }
+    end
+
+    %% ════════════════════════════════════════════════
+    %% PHASE 6 — Job Complete
+    %% ════════════════════════════════════════════════
+    rect rgb(214, 232, 247)
+        Note over Operator,OBS: ✅ Phase 6 — Job Completion
+        TR ->> TR: all node bitmaps = 1111…1
+        TR ->> OBS: job_complete event  { job_id, duration_s, total_bytes }
+        TR -->> Operator: GET /jobs/{job_id}/status → 100% complete
+    end
+
+    %% ════════════════════════════════════════════════
+    %% PHASE 7 — Incremental Update (Delta Patch)
+    %% ════════════════════════════════════════════════
+    rect rgb(234, 250, 241)
+        Note over Operator,OBS: 🔁 Phase 7 — Incremental Model Update (Delta Patch)
+        Operator ->> MS: POST /manifests  { version: 2.0.1 }
+        MS ->> MS: diff v2.0.0 → v2.0.1, compute DeltaPatch
+        MS -->> Operator: { changed_chunks[], unchanged_chunks[] }
+
+        Operator ->> TR: POST /jobs  { manifest_id: v2.0.1, delta: true }
+        TR -->> Operator: { job_id: job-002 }
+
+        Note over N1,N2: Only changed_chunks are fetched.<br/>unchanged_chunks are skipped entirely.
+        N1 ->> TR: GET peers for changed_chunks only
+        TR -->> N1: candidate peers
+        N1 ->> SN: fetch changed chunks (P2P)
+        SN -->> N1: delta bytes
+        N1 ->> N1: verify + apply patch
+        N1 ->> TR: PATCH bitmap (delta job complete)
+    end
