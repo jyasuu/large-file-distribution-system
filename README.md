@@ -5,7 +5,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Status](https://img.shields.io/badge/status-draft-yellow)]()
+[![Status](https://img.shields.io/badge/status-in--development-blue)]()
 
 ---
 
@@ -14,9 +14,10 @@
 When you need to roll out a new model version across a large inference cluster, naive approaches—copying from a single source, or chaining nodes in a pipeline—are too slow and too fragile. This system solves that with a **centralized-tracker-controlled P2P protocol** inspired by BitTorrent, but built for private datacenters.
 
 - A **Centralized Tracker** holds a global view of which chunks every node owns and directs optimal peer selection — without ever touching the data itself.
-- Nodes transfer chunks **directly to each other** (data plane), saturating all available intra-cluster bandwidth.
+- Nodes transfer chunks **directly to each other over raw TCP** (data plane), saturating all available intra-cluster bandwidth.
 - **Erasure Coding** at the tail phase eliminates long-tail stalls on the final rare chunks.
-- **Delta patching** means model updates only transfer what changed.
+- **Delta patching** means model updates only transfer what actually changed.
+- Everything ships as a **single binary** with subcommands for server, node agent, and CLI client.
 
 ---
 
@@ -24,15 +25,15 @@ When you need to roll out a new model version across a large inference cluster, 
 
 | Feature | Details |
 |---|---|
+| **Raw TCP chunk transfer** | Direct node-to-node transfer; no proxy, no HTTP overhead |
 | **Chunked P2P transfer** | Configurable chunk size (default 50 MB); parallel multi-peer download |
 | **Rarity-First scheduling** | Prioritise spreading the rarest chunks first for fastest saturation |
 | **Topology-Aware scheduling** | Prefer same-rack peers to minimise cross-rack traffic |
-| **SHA-256 integrity** | Every chunk verified on receipt; corrupt peers are blacklisted |
-| **Erasure Coding tail** | Reed-Solomon EC activates at >95% completion to kill long-tail stalls |
+| **SHA-256 integrity** | Every chunk verified on receipt; corrupt peers retried automatically |
+| **Erasure Coding tail** | Reed-Solomon EC activates at >95% completion to eliminate long-tail stalls |
 | **Delta patch updates** | Only changed chunks are redistributed on model version bump |
-| **LoRA adapter support** | Distribute fine-tuned adapters independently of the base model |
-| **Real-time observability** | Per-node heatmap, chunk rarity histogram, ETC, bandwidth metrics |
-| **Tracker HA** | Raft-based hot standby; falls back to gossip P2P if Tracker is unavailable |
+| **Prometheus metrics** | Per-node completion ratio, chunks served/received, peer query rate |
+| **Stale node eviction** | Tracker evicts nodes that miss heartbeats; jobs continue uninterrupted |
 | **Scalable** | From single-digit to thousands of nodes with no architecture change |
 
 ---
@@ -55,21 +56,22 @@ When you need to roll out a new model version across a large inference cluster, 
 ┌──────────────────────────────────────────────┐
 │            Control Plane                     │
 │  ┌──────────────────┐  ┌──────────────────┐  │
-│  │  Centralized     │  │  Manifest        │  │
-│  │  Tracker         │  │  Service         │  │
-│  │  • Global bitmap │  │  • chunk_hashes  │  │
-│  │  • Peer ranking  │  │  • version       │  │
-│  │  • BW state      │  │  • chunk_count   │  │
-│  └──────────────────┘  └──────────────────┘  │
-└──────────────────┬───────────────────────────┘
+│   ┌──────────────────────────────────────────────┐  │
+│   │           Centralized Tracker                │  │
+│   │  • Global chunk bitmap (DashMap per node)    │  │
+│   │  • Rarity-First / Topology-Aware scheduling  │  │
+│   │  • Stale node eviction (30 s interval)       │  │
+│   │  • Prometheus metrics endpoint               │  │
+│   └──────────────────────────────────────────────┘  │
+└──────────────────┬───────────────────────────────────┘
                    │ peer-list queries / bitmap updates
-                   │ (control only — no data flows here)
+                   │ (control messages only — no chunk data)
         ┌──────────┴──────────┐
         ▼                     ▼
   ┌───────────┐         ┌───────────┐
-  │ Peer Node │◄───────►│ Peer Node │   Direct P2P
-  │   A-1     │         │   B-1     │   chunk transfer
-  └───────────┘         └─────┬─────┘   (data plane)
+  │ Peer Node │◄───────►│ Peer Node │   Raw TCP
+  │   A-1     │  chunk  │   B-1     │   chunk transfer
+  └───────────┘  bytes  └─────┬─────┘   (data plane)
         ▲                     ▼
         └──────────────────────────── … N nodes
 ```
@@ -85,7 +87,7 @@ See the full diagrams in [`docs/`](docs/):
 
 | Document | Description |
 |---|---|
-| [`docs/spec.md`](docs/spec.md) | Full system design specification |
+| [`docs/spec.md`](docs/spec.md) | Full system design specification (12 sections) |
 | [`docs/spec.docx`](docs/spec.docx) | Word version of the spec |
 | [`docs/architecture.mermaid`](docs/architecture.mermaid) | System architecture diagram |
 | [`docs/sequence.mermaid`](docs/sequence.mermaid) | End-to-end sequence diagram |
@@ -104,16 +106,23 @@ model-distribution/
 │   ├── architecture.mermaid
 │   └── sequence.mermaid
 └── src/
-    ├── main.rs               # entry point & integration smoke-test
-    ├── manifest.rs           # Manifest build, chunk range, serialisation
-    ├── bitmap.rs             # ChunkBitmap — bitvec-backed, SHA-256 verify
+    ├── main.rs                  # CLI: server / node / client / self-test subcommands
+    ├── error.rs                 # Unified DistError type (thiserror)
+    ├── manifest.rs              # Manifest build + async file streaming, ChunkBitmap
+    ├── metrics.rs               # Prometheus exporter setup, metric descriptions
+    ├── erasure.rs               # ErasureCoder (Reed-Solomon k+m), tail-phase controller
+    ├── delta.rs                 # DeltaPatch compute/apply, PatchApplicator
     ├── tracker/
-    │   ├── mod.rs            # Tracker state, update_node
-    │   ├── rarity.rs         # Rarity-First peer selection
-    │   └── topology.rs       # Topology-Aware peer selection
-    ├── peer.rs               # PeerNode async download loop
-    ├── erasure.rs            # Reed-Solomon EC — tail-phase coder
-    └── delta.rs              # DeltaPatch — compute, apply, chunks_to_fetch
+    │   ├── mod.rs               # Tracker state (DashMap), heartbeat, job lifecycle
+    │   ├── scheduler.rs         # Rarity-First + Topology-Aware peer selection
+    │   └── server.rs            # TCP accept loop, request dispatch
+    ├── peer/
+    │   ├── mod.rs               # PeerNode: orchestrates heartbeat + server + downloader
+    │   ├── downloader.rs        # Async download loop: Tracker query → TCP fetch → verify
+    │   └── chunk_server.rs      # Raw TCP server: serves verified chunks to peers
+    └── proto/
+        ├── mod.rs               # Length-prefixed JSON framing, Request/Response types
+        └── client.rs            # TrackerClient (create job, heartbeat, get_peers, status)
 ```
 
 ---
@@ -133,20 +142,24 @@ cd model-distribution
 cargo build --release
 ```
 
-### Run the smoke-test
+### Run the in-process self-test (no network needed)
 
 ```bash
-cargo run --release
+cargo run --release -- self-test
 ```
 
 Expected output:
 
 ```
-Manifest: 2 chunks
-PeerNode ready — would call peer.run().await in production
-Delta patch v2.0.0 → v2.0.1: 1 unchanged, 1 changed, 0 deleted
-EC encode OK — 6 shards total (4 data + 2 parity)
-EC reconstruct OK — missing shards recovered
+INFO self-test: manifest
+INFO   chunk_count=4 ✓
+INFO self-test: delta patch
+INFO   changed=1 unchanged=3 ✓
+INFO self-test: erasure coding
+INFO   reconstruct shards [1,3] ✓
+INFO self-test: bitmap
+INFO   completion_ratio=0.2 ✓
+INFO ✅  all self-tests passed
 ```
 
 ### Run tests
@@ -157,30 +170,100 @@ cargo test
 
 ---
 
+## 🖥️ Usage
+
+### Start the server (Tracker + metrics endpoint)
+
+```bash
+model-dist server \
+  --tracker-addr 0.0.0.0:7000 \
+  --metrics-addr 0.0.0.0:9000
+```
+
+### Create a distribution job
+
+```bash
+model-dist client \
+  --tracker-addr 127.0.0.1:7000 \
+  create-job \
+  --file-path /data/llama-3-70b.bin \
+  --file-id   llama-3-70b \
+  --version   2.0.0 \
+  --chunk-size-mb 50 \
+  --policy    rarity-first
+```
+
+### Start a peer node agent
+
+```bash
+model-dist node \
+  --tracker-addr 127.0.0.1:7000 \
+  --peer-addr    0.0.0.0:7100 \
+  --rack-id      rack-A \
+  --job-id       <JOB_ID> \
+  --data-dir     /var/lib/model-dist \
+  --concurrency  8
+```
+
+### Check job status
+
+```bash
+model-dist client --tracker-addr 127.0.0.1:7000 status <JOB_ID>
+```
+
+### Cancel a job
+
+```bash
+model-dist client --tracker-addr 127.0.0.1:7000 cancel <JOB_ID>
+```
+
+---
+
+## 🔌 Wire Protocol
+
+The Tracker uses **raw TCP with length-prefixed JSON framing** for all control-plane messages. Chunk data travels on a separate raw TCP connection directly between peer nodes — the Tracker never relays chunk bytes.
+
+```
+Control-plane frame:
+  ┌──────────────┬──────────────────┐
+  │  4 bytes     │  N bytes         │
+  │  payload len │  JSON payload    │
+  └──────────────┴──────────────────┘
+
+Chunk data frame (peer → peer):
+  Request:   4-byte job_id_len | job_id bytes | 4-byte chunk_index
+  Response:  4-byte status | 8-byte data_len | N bytes chunk data
+```
+
+---
+
 ## 🔧 Configuration
 
-Distribution jobs are configured via a JSON payload when creating a job:
+**Node agent flags:**
 
-```json
-{
-  "manifest_id": "llama-3-70b-v2.0.0",
-  "scheduling_policy": "rarity-first",
-  "chunk_size_mb": 50,
-  "max_concurrent_chunks": 8,
-  "ec_tail_threshold": 0.95,
-  "ec_data_shards": 4,
-  "ec_parity_shards": 2
-}
-```
+| Flag | Default | Description |
+|---|---|---|
+| `--tracker-addr` | `127.0.0.1:7000` | Tracker TCP address |
+| `--peer-addr` | `0.0.0.0:7100` | This node's chunk-server listen address |
+| `--rack-id` | `rack-0` | Rack identifier for topology-aware scheduling |
+| `--data-dir` | `/tmp/model-dist` | Directory where chunk files are written |
+| `--concurrency` | `8` | Max concurrent chunk downloads |
+
+**Job creation flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--chunk-size-mb` | `50` | Chunk size in MB; tune to file-size distribution |
+| `--policy` | `rarity-first` | `rarity-first` or `topology-aware` |
+
+**Erasure coding** (configured in `TailConfig` in `src/erasure.rs`):
 
 | Field | Default | Description |
 |---|---|---|
-| `scheduling_policy` | `rarity-first` | `rarity-first` or `topology-aware` |
-| `chunk_size_mb` | `50` | Chunk size in MB. Tune per file-size distribution. |
-| `max_concurrent_chunks` | `8` | Max parallel chunk downloads per node. |
-| `ec_tail_threshold` | `0.95` | Fraction of nodes complete before EC activates. |
-| `ec_data_shards` | `4` | Reed-Solomon k (data shards). |
-| `ec_parity_shards` | `2` | Reed-Solomon m (parity shards). |
+| `activation_threshold` | `0.95` | Fraction of nodes complete before EC activates |
+| `data_shards` | `4` | Reed-Solomon k |
+| `parity_shards` | `2` | Reed-Solomon m — any k-of-(k+m) shards reconstruct the data |
+| `scarce_threshold` | `3` | Min replica count before a chunk is considered scarce |
 
 ---
 
@@ -198,18 +281,26 @@ Distribution jobs are configured via a JSON payload when creating a job:
 ## 🧩 Key Dependencies
 
 ```toml
-[dependencies]
-tokio                  = { version = "1", features = ["full"] }
-sha2                   = "0.10"
-bitvec                 = "1"
-reqwest                = { version = "0.11", features = ["stream"] }
-bytes                  = "1"
-serde                  = { version = "1", features = ["derive"] }
-serde_json             = "1"
-reed-solomon-erasure   = "6"
-anyhow                 = "1"
-tracing                = "0.1"
-tracing-subscriber     = "0.3"
+tokio                       = { version = "1", features = ["full"] }
+tokio-util                  = { version = "0.7", features = ["codec", "io"] }
+bytes                       = "1"
+sha2                        = "0.10"
+hex                         = "0.4"
+reed-solomon-erasure        = "6"
+bitvec                      = "1"
+serde                       = { version = "1", features = ["derive"] }
+serde_json                  = "1"
+tracing                     = "0.1"
+tracing-subscriber          = { version = "0.3", features = ["env-filter", "fmt"] }
+metrics                     = "0.22"
+metrics-exporter-prometheus = "0.13"
+clap                        = { version = "4", features = ["derive"] }
+uuid                        = { version = "1", features = ["v4"] }
+dashmap                     = "5"
+parking_lot                 = "0.12"
+anyhow                      = "1"
+thiserror                   = "1"
+rand                        = "0.8"
 ```
 
 ---
@@ -221,18 +312,22 @@ tracing-subscriber     = "0.3"
 Spreads the rarest chunks across the cluster first. Maximises the number of nodes that can act as uploaders early, driving exponential propagation. Best for fastest overall completion.
 
 ```
-chunk_priority = sort by holder_count ASC, then by peer_upload_bw DESC
+candidate peers = nodes holding chunk_index, excluding requester
+ranked by:        upload_bw_mbps DESC
 ```
+
+The download loop orders missing chunks by `holder_count ASC` (rarest first) before querying the Tracker.
 
 ### Topology-Aware
 
 Prefers peers on the same rack or pod before going cross-rack. Keeps traffic local, reduces network jitter, and plays well with QoS policies.
 
 ```
-peer_priority = same_rack FIRST, then by upload_bw DESC
+same-rack peers  → sorted by upload_bw_mbps DESC   (tried first)
+remote peers     → sorted by upload_bw_mbps DESC   (fallback)
 ```
 
-> Both strategies are available simultaneously — set `scheduling_policy` per job.
+> Both strategies are available simultaneously — set `--policy` per job at creation time.
 
 ---
 
@@ -240,43 +335,43 @@ peer_priority = same_rack FIRST, then by upload_bw DESC
 
 | Failure | Behaviour |
 |---|---|
-| Peer node crash | Tracker detects stale heartbeat; re-routes downloaders to next candidate |
-| Chunk corruption | SHA-256 mismatch → discard, retry from different peer, flag bad source |
-| Tracker primary down | Hot standby via Raft takes over; state reconstructed from node bitmaps |
-| Tracker fully unavailable | Nodes fall back to gossip-based peer discovery — slower but keeps progressing |
-| Long tail | Erasure Coding activates at configurable threshold, eliminates stall |
-| Seed node loss | Any fully-downloaded node promotes itself as a seeder |
+| Peer node crash | Tracker evicts stale node after 60 s; downloaders retry next candidate peer automatically |
+| Chunk corruption | SHA-256 mismatch → chunk discarded, retried from a different peer (up to 3 attempts with exponential backoff) |
+| Peer chunk not found | Chunk server returns error status; downloader moves to next candidate immediately |
+| Long tail | Erasure Coding activates at the configurable threshold; parity shards distributed to stalled nodes |
+| Seed node loss | Any node that completed its download can serve chunks; rarity scoring escalates seeding priority |
 
----
-
-## 📡 Tracker API
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/jobs` | `POST` | Create a distribution job |
-| `/jobs/{job_id}/status` | `GET` | Job progress, ETC, per-node summary |
-| `/jobs/{job_id}/peers/{chunk_id}` | `GET` | Ranked peer list for a chunk |
-| `/jobs/{job_id}/nodes/{node_id}` | `PATCH` | Node heartbeat — bitmap + bandwidth |
-| `/jobs/{job_id}` | `DELETE` | Cancel a job |
+> Tracker HA (Raft + gossip fallback) is a planned feature — see Roadmap.
 
 ---
 
 ## 🔭 Observability
 
-- **Metrics:** job % complete, per-node bitmap coverage, chunk rarity, tracker query latency (p50/p95/p99)
-- **Alerts:** node stall > N s, chunk replica_count drops to 1, ETC exceeds SLA
-- **Dashboard:** real-time heatmap, chunk rarity histogram, cross-rack vs. intra-rack traffic split
+Prometheus metrics are exposed at `http://<metrics-addr>/metrics`:
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `tracker_jobs_created_total` | Counter | — | Total distribution jobs created |
+| `tracker_jobs_complete_total` | Counter | — | Jobs where all nodes reached 100% |
+| `tracker_peer_queries_total` | Counter | `job_id` | Peer-selection queries served |
+| `peer_chunks_received_total` | Counter | `node_id` | Chunks downloaded and verified |
+| `peer_chunks_served_total` | Counter | — | Chunks served to other peers |
+| `node_completion_ratio` | Gauge | `job_id`, `node_id` | Per-node fraction complete (0.0–1.0) |
+
+
 
 ---
 
 ## 🗺️ Roadmap
 
-- [ ] gRPC data plane (replace HTTP range requests)
-- [ ] TLS mutual auth for intra-cluster chunk transfer
+- [ ] Tracker HA — Raft-based hot standby + gossip fallback mode
+- [ ] TLS mutual auth for intra-cluster chunk transfers
+- [ ] Adaptive EC parameter tuning based on live traffic patterns
 - [ ] Multi-datacenter federated Tracker hierarchy
-- [ ] Job preemption / priority queuing
-- [ ] In-transit compression profiling
-- [ ] Adaptive EC parameter tuning based on live traffic
+- [ ] Job preemption and priority queuing
+- [ ] In-transit compression (model-aware; profile before enabling)
+- [ ] gRPC control plane (replace length-prefixed JSON framing)
+- [ ] Web dashboard — real-time node heatmap and chunk rarity histogram
 
 ---
 
