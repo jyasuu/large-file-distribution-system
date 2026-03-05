@@ -260,7 +260,7 @@ impl Tracker {
         // Check job completion
         let pct = ns.bitmap.completion_ratio();
         metrics::gauge!("node_completion_ratio", pct as f64,
-            "job_id" => job_id.to_string(), "node_id" => node_id.clone());
+            "job_id" => job_id, "node_id" => node_id.as_str());
 
         if pct >= 1.0 {
             let all_done = job.nodes.iter().all(|e| e.value().read().bitmap.is_complete());
@@ -290,7 +290,7 @@ impl Tracker {
             SchedulingPolicy::TopologyAware =>
                 scheduler::topology_aware(&job, requester_id, requester_rack, chunk_index, top_n),
         };
-        metrics::counter!("tracker_peer_queries_total", 1, "job_id" => job_id.to_string());
+        metrics::counter!("tracker_peer_queries_total", 1, "job_id" => job_id);
         Ok(peers)
     }
 

@@ -179,7 +179,7 @@ async fn download_chunk_from_peer(
     // ── Update bitmap ─────────────────────────────────────────────────────────
     cfg.bitmap.lock().await.mark_complete(chunk_index);
 
-    metrics::counter!("peer_chunks_received_total", 1, "node_id" => cfg.node_id.clone());
+    metrics::counter!("peer_chunks_received_total", 1, "node_id" => cfg.node_id.as_str());
     debug!(
         node  = %cfg.node_id,
         chunk = chunk_index,
