@@ -51,29 +51,28 @@ When you need to roll out a new model version across a large inference cluster, 
           │       Seed Node         │
           │  first complete copy    │
           └────────────┬────────────┘
-                       │ reports bitmap
+                       │ bitmap heartbeat (TCP control plane)
                        ▼
-┌──────────────────────────────────────────────┐
-│            Control Plane                     │
-│  ┌──────────────────┐  ┌──────────────────┐  │
-│   ┌──────────────────────────────────────────────┐  │
-│   │           Centralized Tracker                │  │
-│   │  • Global chunk bitmap (DashMap per node)    │  │
-│   │  • Rarity-First / Topology-Aware scheduling  │  │
-│   │  • Stale node eviction (30 s interval)       │  │
-│   │  • Prometheus metrics endpoint               │  │
-│   └──────────────────────────────────────────────┘  │
-└──────────────────┬───────────────────────────────────┘
-                   │ peer-list queries / bitmap updates
-                   │ (control messages only — no chunk data)
-        ┌──────────┴──────────┐
-        ▼                     ▼
-  ┌───────────┐         ┌───────────┐
-  │ Peer Node │◄───────►│ Peer Node │   Raw TCP
-  │   A-1     │  chunk  │   B-1     │   chunk transfer
-  └───────────┘  bytes  └─────┬─────┘   (data plane)
-        ▲                     ▼
-        └──────────────────────────── … N nodes
+┌──────────────────────────────────────────────────────┐
+│                   Control Plane                      │
+│  ┌────────────────────────────────────────────────┐  │
+│  │             Centralized Tracker                │  │
+│  │  • Global chunk bitmap (DashMap per node)      │  │
+│  │  • Rarity-First / Topology-Aware scheduling    │  │
+│  │  • Stale node eviction (30 s interval)         │  │
+│  │  • Prometheus metrics endpoint (:9000)         │  │
+│  └────────────────────────────────────────────────┘  │
+└──────────────────────┬───────────────────────────────┘
+                       │ peer-list queries / bitmap updates
+                       │ (control only — no chunk data)
+        ┌──────────────┴──────────────┐
+        ▼                             ▼
+  ┌───────────┐               ┌───────────┐
+  │ Peer Node │◄─── chunk ───►│ Peer Node │   Raw TCP
+  │   A-1     │    (TCP)      │   B-1     │   data plane
+  └───────────┘               └─────┬─────┘
+        ▲                           ▼
+        └────────────── … N nodes ──┘
 ```
 
 See the full diagrams in [`docs/`](docs/):
@@ -137,8 +136,8 @@ model-distribution/
 ### Build
 
 ```bash
-git clone https://github.com/your-org/model-distribution
-cd model-distribution
+git clone https://github.com/jyasuu/large-file-distribution-system
+cd large-file-distribution-system
 cargo build --release
 ```
 
@@ -292,8 +291,8 @@ serde                       = { version = "1", features = ["derive"] }
 serde_json                  = "1"
 tracing                     = "0.1"
 tracing-subscriber          = { version = "0.3", features = ["env-filter", "fmt"] }
-metrics                     = "0.22"
-metrics-exporter-prometheus = "0.13"
+metrics                     = "0.21"
+metrics-exporter-prometheus = "0.12"
 clap                        = { version = "4", features = ["derive"] }
 uuid                        = { version = "1", features = ["v4"] }
 dashmap                     = "5"
@@ -349,16 +348,16 @@ remote peers     → sorted by upload_bw_mbps DESC   (fallback)
 
 Prometheus metrics are exposed at `http://<metrics-addr>/metrics`:
 
-| Metric | Type | Labels | Description |
-|---|---|---|---|
-| `tracker_jobs_created_total` | Counter | — | Total distribution jobs created |
-| `tracker_jobs_complete_total` | Counter | — | Jobs where all nodes reached 100% |
-| `tracker_peer_queries_total` | Counter | `job_id` | Peer-selection queries served |
-| `peer_chunks_received_total` | Counter | `node_id` | Chunks downloaded and verified |
-| `peer_chunks_served_total` | Counter | — | Chunks served to other peers |
-| `node_completion_ratio` | Gauge | `job_id`, `node_id` | Per-node fraction complete (0.0–1.0) |
+| Metric | Type | Description |
+|---|---|---|
+| `tracker_jobs_created_total` | Counter | Total distribution jobs created |
+| `tracker_jobs_complete_total` | Counter | Jobs where all nodes reached 100% |
+| `tracker_peer_queries_total` | Counter | Peer-selection queries served |
+| `peer_chunks_received_total` | Counter | Chunks downloaded and verified by peer nodes |
+| `peer_chunks_served_total` | Counter | Chunks served to other peers |
+| `node_completion_ratio` | Gauge | Cluster-wide completion ratio (0.0–1.0) |
 
-
+> Per-node and per-job context is emitted via `tracing` structured logs alongside these metrics.
 
 ---
 
