@@ -65,7 +65,7 @@ async fn handle_chunk_request(
             stream.write_u32(0).await?;                     // status: OK
             stream.write_u64(data.len() as u64).await?;    // data length
             stream.write_all(&data).await?;                 // chunk bytes
-            metrics::counter!("peer_chunks_served_total", 1_u64);
+            metrics::increment_counter!("peer_chunks_served_total");
             debug!(chunk = chunk_index, bytes = data.len(), "chunk served");
         }
         Err(_) => {
