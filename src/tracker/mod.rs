@@ -1,7 +1,6 @@
 pub mod server;
 pub mod scheduler;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use dashmap::DashMap;
@@ -213,7 +212,7 @@ impl Tracker {
     pub fn create_job(&self, manifest: Manifest, policy: SchedulingPolicy) -> Arc<Job> {
         let job = Job::new(manifest, policy);
         self.jobs.insert(job.job_id.clone(), job.clone());
-        metrics::counter!("tracker_jobs_created_total", 1);
+        metrics::counter!("tracker_jobs_created_total", 1_u64);
         job
     }
 
@@ -259,14 +258,15 @@ impl Tracker {
 
         // Check job completion
         let pct = ns.bitmap.completion_ratio();
-        metrics::gauge!("node_completion_ratio", pct as f64);
+        let _pct_f64: f64 = pct as f64;
+        metrics::gauge!("node_completion_ratio", _pct_f64);
         tracing::debug!(job_id, node_id = %node_id, pct = %pct, "node progress");
 
         if pct >= 1.0 {
             let all_done = job.nodes.iter().all(|e| e.value().read().bitmap.is_complete());
             if all_done {
                 *job.status.write() = JobStatus::Complete;
-                metrics::counter!("tracker_jobs_complete_total", 1);
+                metrics::counter!("tracker_jobs_complete_total", 1_u64);
                 tracing::info!(job_id, "🎉 all nodes complete");
             }
         }
@@ -290,7 +290,7 @@ impl Tracker {
             SchedulingPolicy::TopologyAware =>
                 scheduler::topology_aware(&job, requester_id, requester_rack, chunk_index, top_n),
         };
-        metrics::counter!("tracker_peer_queries_total", 1);
+        metrics::counter!("tracker_peer_queries_total", 1_u64);
         tracing::debug!(job_id, chunk_index, "peer query");
         Ok(peers)
     }

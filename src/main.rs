@@ -123,7 +123,7 @@ async fn run_server(args: ServerArgs) -> Result<()> {
     metrics::start_metrics_server(&args.metrics_addr).await?;
 
     let tracker = tracker::Tracker::new();
-    tracker::server::run(tracker, &args.tracker_addr).await
+    tracker::server::run(tracker, &args.tracker_addr).await.map_err(anyhow::Error::from)
 }
 
 async fn run_node(args: NodeArgs) -> Result<()> {
@@ -138,7 +138,7 @@ async fn run_node(args: NodeArgs) -> Result<()> {
         concurrency:  args.concurrency,
     });
 
-    node.run().await
+    node.run().await.map_err(anyhow::Error::from)
 }
 
 async fn run_client(args: ClientArgs) -> Result<()> {

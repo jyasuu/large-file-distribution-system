@@ -1,10 +1,8 @@
-use std::path::Path;
 use tokio::net::TcpStream;
 
 use crate::error::{DistError, Result};
 use crate::manifest::Manifest;
 use crate::proto::{read_msg, write_msg, PeerInfo, Request, Response};
-use crate::tracker::JobSnapshot;
 
 /// Simple synchronous-style client wrapping one TCP connection to the Tracker.
 /// Each method opens a fresh connection (stateless; suitable for CLI use).

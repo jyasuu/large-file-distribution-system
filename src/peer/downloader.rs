@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Semaphore};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::error::{DistError, Result};
 use crate::manifest::{ChunkBitmap, Manifest};
@@ -179,7 +179,7 @@ async fn download_chunk_from_peer(
     // ── Update bitmap ─────────────────────────────────────────────────────────
     cfg.bitmap.lock().await.mark_complete(chunk_index);
 
-    metrics::counter!("peer_chunks_received_total", 1);
+    metrics::counter!("peer_chunks_received_total", 1_u64);
     tracing::debug!(node_id = %cfg.node_id, chunk_index, "chunk received");
     debug!(
         node  = %cfg.node_id,
